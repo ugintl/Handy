@@ -479,6 +479,10 @@ pub struct AppSettings {
     /// instead of pasting it all when the recording stops.
     #[serde(default)]
     pub live_typing: bool,
+    /// Turn spoken punctuation ("comma", "full stop", "new line") into the
+    /// characters it names.
+    #[serde(default = "default_voice_commands")]
+    pub voice_commands: bool,
     #[serde(default = "default_app_language")]
     pub app_language: String,
     #[serde(default = "default_theme")]
@@ -607,6 +611,10 @@ fn default_vad_enabled() -> bool {
 }
 
 fn default_long_form_chunking() -> bool {
+    true
+}
+
+fn default_voice_commands() -> bool {
     true
 }
 
@@ -1006,6 +1014,7 @@ pub fn get_default_settings() -> AppSettings {
         mute_while_recording: false,
         append_trailing_space: false,
         live_typing: false,
+        voice_commands: default_voice_commands(),
         app_language: default_app_language(),
         theme: default_theme(),
         experimental_enabled: false,

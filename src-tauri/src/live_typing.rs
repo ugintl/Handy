@@ -2,9 +2,15 @@
 //! the user is still speaking.
 //!
 //! The stream's `committed` text is append-only, so each new piece of it is
-//! typed at the cursor as it arrives. Typing pauses while a modifier key is
-//! held (a held Ctrl would turn letters into shortcuts) and while another
-//! window is focused, and resumes once both clear. When the recording stops,
+//! typed at the cursor. Commits arrive in bursts of a few words about once a
+//! second, so new text is typed at a steady pace spread over the expected gap
+//! to the next commit rather than all at once. The same filler removal and
+//! voice commands as the final transcript are applied as it goes, holding back
+//! a trailing word that may start a command ("new" before "line").
+//!
+//! Typing pauses while a modifier key is held (a held Ctrl would turn letters
+//! into shortcuts) and while another window is focused, and resumes once both
+//! clear. When the recording stops,
 //! [`finish`] reconciles what was typed with the final transcript: missing
 //! text is appended, and a rewritten tail of up to [`MAX_FINAL_FIX`]
 //! characters is backspaced and retyped.
@@ -22,11 +28,25 @@ use log::{debug, info, warn};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
+use crate::audio_toolkit::{
+    apply_voice_commands, normalize_transcription_output, remove_filler_words,
+    trailing_voice_command_start, OutputLanguageEvidence,
+};
 use crate::input::{self, EnigoState};
-use crate::settings::{get_settings, ClipboardHandling};
+use crate::settings::{get_settings, AppSettings, ClipboardHandling};
 
-/// How often the worker re-checks modifiers and focus while text is pending.
-const POLL_INTERVAL: Duration = Duration::from_millis(40);
+/// How often the worker types the next characters and re-checks modifiers and
+/// focus while text is pending.
+const POLL_INTERVAL: Duration = Duration::from_millis(15);
+/// Assumed gap between commits until one has been measured.
+const INITIAL_COMMIT_GAP: Duration = Duration::from_millis(1000);
+/// Gaps longer than this are pauses in speech, not the model's cadence.
+const MAX_COMMIT_GAP: Duration = Duration::from_secs(3);
+/// Share of the expected gap to the next commit spent typing a commit's text,
+/// so typing usually finishes just before more text arrives.
+const PACE_SHARE: f64 = 0.8;
+/// Slowest typing pace, in characters per second.
+const MIN_CHARS_PER_SEC: f64 = 20.0;
 /// Largest committed-text revision fixed while speaking. Committed text is
 /// append-only, so this only guards against an unexpected rewrite.
 const MAX_LIVE_FIX: usize = 24;
@@ -106,8 +126,8 @@ pub fn cancel(app: &AppHandle) {
 ///
 /// Returns `true` when live typing has handled the output, including the
 /// trailing space, auto-submit and clipboard settings. Returns `false` when
-/// there was no session or nothing was typed yet; the caller should then
-/// paste `final_text` the usual way.
+/// there was no session; the caller should then paste `final_text` the usual
+/// way.
 pub fn finish(app: &AppHandle, final_text: &str) -> bool {
     let Some(typer) = app.try_state::<LiveTyper>() else {
         return false;
@@ -128,24 +148,47 @@ pub fn finish(app: &AppHandle, final_text: &str) -> bool {
 
 struct Worker {
     app: AppHandle,
+    settings: AppSettings,
+    language: OutputLanguageEvidence,
     target: Option<isize>,
     /// Text typed so far this session.
     typed: String,
-    /// Latest committed text from the stream, leading whitespace trimmed.
+    /// Latest committed text from the stream, cleaned up like the final
+    /// transcript.
     committed: String,
     /// Set when the committed text diverged beyond what is safe to fix live;
     /// the rest is left for [`finish`].
     stalled: bool,
+    last_commit: Option<Instant>,
+    /// Smoothed gap between commits.
+    commit_gap: Duration,
+    /// Current typing pace, in characters per second.
+    pace: f64,
+    /// Characters owed by the pace but not typed yet.
+    budget: f64,
+    last_tick: Instant,
 }
 
 impl Worker {
     fn new(app: AppHandle, target: Option<isize>) -> Self {
+        let settings = get_settings(&app);
+        let language = match settings.selected_language.as_str() {
+            "auto" => OutputLanguageEvidence::Unknown,
+            lang => OutputLanguageEvidence::UserSelected(lang.to_string()),
+        };
         Self {
             app,
+            settings,
+            language,
             target,
             typed: String::new(),
             committed: String::new(),
             stalled: false,
+            last_commit: None,
+            commit_gap: INITIAL_COMMIT_GAP,
+            pace: MIN_CHARS_PER_SEC,
+            budget: 0.0,
+            last_tick: Instant::now(),
         }
     }
 
@@ -153,7 +196,7 @@ impl Worker {
         loop {
             match rx.recv_timeout(POLL_INTERVAL) {
                 Ok(Msg::Committed(text)) => {
-                    self.committed = text.trim_start().to_string();
+                    self.on_committed(&text);
                     self.type_pending();
                 }
                 Ok(Msg::Finish { final_text, reply }) => {
@@ -170,13 +213,83 @@ impl Worker {
         !platform::modifiers_held() && platform::foreground_window() == self.target
     }
 
-    /// Type whatever committed text is not on screen yet, if it is safe now.
-    fn type_pending(&mut self) {
-        if self.stalled || self.committed == self.typed || !self.ready() {
+    /// The committed text as it should appear on screen: cleaned up like the
+    /// final transcript, minus a trailing word that may start a voice command.
+    fn clean(&self, committed: &str) -> String {
+        let text = remove_filler_words(
+            committed,
+            &self.language,
+            &self.settings.custom_filler_words,
+            self.settings.filler_word_removal_enabled,
+        );
+        let text = normalize_transcription_output(&text);
+        if !self.settings.voice_commands {
+            return text;
+        }
+        let mut text = apply_voice_commands(&text);
+        text.truncate(trailing_voice_command_start(&text));
+        text
+    }
+
+    /// Take a new committed text and set the pace to type its new part over
+    /// most of the expected gap to the next commit.
+    fn on_committed(&mut self, raw: &str) {
+        let committed = self.clean(raw);
+        // Updates that only change the tentative tail say nothing about pace.
+        if committed == self.committed {
             return;
         }
-        let committed = self.committed.clone();
-        if !self.converge(&committed, MAX_LIVE_FIX) {
+        self.committed = committed;
+
+        let now = Instant::now();
+        if let Some(last) = self.last_commit.replace(now) {
+            let gap = now - last;
+            if gap < MAX_COMMIT_GAP {
+                self.commit_gap = self.commit_gap.mul_f64(0.7) + gap.mul_f64(0.3);
+            }
+        }
+        let pending = self.pending().1;
+        self.pace = (pending as f64 / (self.commit_gap.as_secs_f64() * PACE_SHARE))
+            .max(MIN_CHARS_PER_SEC);
+    }
+
+    /// Byte length of the typed text still matching the committed text, and
+    /// how many committed characters come after it.
+    fn pending(&self) -> (usize, usize) {
+        let common = common_prefix_bytes(&self.typed, &self.committed);
+        (common, self.committed[common..].chars().count())
+    }
+
+    /// Type the next few committed characters the pace allows, if it is safe
+    /// now. A rewrite of typed text is fixed right away.
+    fn type_pending(&mut self) {
+        let now = Instant::now();
+        let elapsed = now - self.last_tick;
+        self.last_tick = now;
+
+        if self.stalled || self.committed == self.typed {
+            self.budget = 0.0;
+            return;
+        }
+        if !self.ready() {
+            return;
+        }
+        let (common, pending) = self.pending();
+        let rewrite = common < self.typed.len();
+        self.budget = (self.budget + self.pace * elapsed.as_secs_f64()).min(pending as f64);
+        let count = self.budget as usize;
+        if count == 0 && !rewrite {
+            return;
+        }
+
+        let end = self.committed[common..]
+            .char_indices()
+            .nth(count)
+            .map_or(self.committed.len(), |(i, _)| common + i);
+        let goal = self.committed[..end].to_string();
+        if self.converge(&goal, MAX_LIVE_FIX) {
+            self.budget -= count as f64;
+        } else {
             warn!("Live typing: committed text was rewritten; waiting for the final transcript");
             self.stalled = true;
         }
@@ -198,8 +311,17 @@ impl Worker {
                     .key(Key::Backspace, Direction::Click)
                     .map_err(|e| format!("Failed to send Backspace: {}", e))?;
             }
-            if !insert.is_empty() {
-                input::paste_text_direct(enigo, insert)?;
+            // Line breaks are typed as Enter; apps differ in what they do
+            // with a typed line feed character.
+            for (i, line) in insert.split('\n').enumerate() {
+                if i > 0 {
+                    enigo
+                        .key(Key::Return, Direction::Click)
+                        .map_err(|e| format!("Failed to send Enter: {}", e))?;
+                }
+                if !line.is_empty() {
+                    input::paste_text_direct(enigo, line)?;
+                }
             }
             Ok(())
         });
@@ -216,13 +338,10 @@ impl Worker {
         true
     }
 
+    /// Type whatever the final transcript adds, even when nothing was typed
+    /// live (a short phrase), so the output never depends on the paste method.
     fn finish(&mut self, final_text: &str) -> bool {
-        // Nothing reached the screen: let the normal paste path handle it.
-        if self.typed.is_empty() {
-            return false;
-        }
-
-        let settings = get_settings(&self.app);
+        let settings = self.settings.clone();
         let mut final_text = final_text.trim_start().to_string();
         if settings.append_trailing_space {
             final_text.push(' ');

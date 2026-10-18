@@ -476,9 +476,159 @@ pub fn normalize_transcription_output(text: &str) -> String {
     normalized.trim().to_string()
 }
 
+/// Spoken commands, longest first so "new paragraph" wins over "new line".
+/// Group 1 is punctuation the model put before the command, group 2 the
+/// command itself; trailing punctuation and spaces are consumed.
+static VOICE_COMMAND_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)([,.;:!?]?)\s*\b(new paragraph|new line|next line|full stop|question mark|exclamation mark|exclamation point|semi ?colon|colon|comma)\b[,.;:!?]?[ \t]*",
+    )
+    .unwrap()
+});
+
+/// First words of the multi-word commands above. Live typing holds one back
+/// at the end of the text until the next word shows whether it is a command.
+const VOICE_COMMAND_FIRST_WORDS: &[&str] =
+    &["new", "next", "full", "question", "exclamation", "semi"];
+
+/// What a spoken command becomes.
+fn voice_command_text(command: &str) -> &'static str {
+    match command.to_lowercase().as_str() {
+        "new paragraph" => "\n\n",
+        "new line" | "next line" => "\n",
+        "full stop" => ".",
+        "question mark" => "?",
+        "exclamation mark" | "exclamation point" => "!",
+        "colon" => ":",
+        "comma" => ",",
+        _ => ";", // "semicolon" / "semi colon"
+    }
+}
+
+/// Replaces spoken punctuation ("full stop", "comma", "new line", ...) with
+/// the characters it names, and capitalizes the word after a sentence end or
+/// line break. Punctuation the model added around a command is dropped, except
+/// a sentence end before a line break.
+///
+/// Must run after [`normalize_transcription_output`], which collapses all
+/// whitespace (line breaks included) to single spaces.
+pub fn apply_voice_commands(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut resume = 0;
+    let mut capital_owed = false;
+
+    for caps in VOICE_COMMAND_PATTERN.captures_iter(text) {
+        let whole = caps.get(0).unwrap();
+        push_restoring_capital(&mut out, &text[resume..whole.start()], &mut capital_owed);
+        resume = whole.end();
+        // Drop the space left after a previous command.
+        out.truncate(out.trim_end_matches([' ', '\t']).len());
+
+        let before = &caps[1];
+        let replacement = voice_command_text(&caps[2]);
+        if replacement.starts_with('\n') {
+            if matches!(before, "." | "!" | "?") {
+                out.push_str(before);
+            }
+            out.push_str(replacement);
+            capital_owed = true;
+        } else {
+            out.push_str(replacement);
+            capital_owed = matches!(replacement, "." | "!" | "?");
+            // Keep a space before the next word, but not before a line break
+            // or more punctuation.
+            if text[resume..]
+                .chars()
+                .next()
+                .is_some_and(char::is_alphanumeric)
+            {
+                out.push(' ');
+            }
+        }
+    }
+    push_restoring_capital(&mut out, &text[resume..], &mut capital_owed);
+
+    out
+}
+
+/// Byte index where a trailing, possibly unfinished voice command starts
+/// ("... and new" might become "new line"), or `text.len()` if the text does
+/// not end with the first word of one.
+pub fn trailing_voice_command_start(text: &str) -> usize {
+    let trimmed = text.trim_end();
+    let word_start = trimmed
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !c.is_alphabetic())
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let word = trimmed[word_start..].to_lowercase();
+    if VOICE_COMMAND_FIRST_WORDS.contains(&word.as_str()) {
+        trimmed[..word_start].trim_end().len()
+    } else {
+        text.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn voice_commands_replace_spoken_punctuation() {
+        assert_eq!(
+            apply_voice_commands("hello comma how are you question mark"),
+            "hello, how are you?"
+        );
+        assert_eq!(
+            apply_voice_commands("I agree full stop thanks"),
+            "I agree. Thanks"
+        );
+        assert_eq!(
+            apply_voice_commands("Wow exclamation point semi colon colon"),
+            "Wow!;:"
+        );
+    }
+
+    #[test]
+    fn voice_commands_drop_punctuation_the_model_added() {
+        assert_eq!(
+            apply_voice_commands("Hello, full stop. How are you?"),
+            "Hello. How are you?"
+        );
+        assert_eq!(
+            apply_voice_commands("First point, comma, second point."),
+            "First point, second point."
+        );
+    }
+
+    #[test]
+    fn voice_commands_insert_line_breaks() {
+        assert_eq!(
+            apply_voice_commands("Dear John, new line thanks for the update."),
+            "Dear John\nThanks for the update."
+        );
+        assert_eq!(
+            apply_voice_commands("That is all. New paragraph. next topic"),
+            "That is all.\n\nNext topic"
+        );
+        assert_eq!(apply_voice_commands("one next line two"), "one\nTwo");
+    }
+
+    #[test]
+    fn voice_commands_leave_ordinary_words_alone() {
+        let text = "A new product line and a colonel with a full stomach.";
+        assert_eq!(apply_voice_commands(text), text);
+    }
+
+    #[test]
+    fn trailing_voice_command_start_holds_back_first_words() {
+        assert_eq!(trailing_voice_command_start("hello new"), 5);
+        assert_eq!(trailing_voice_command_start("hello full "), 5);
+        assert_eq!(trailing_voice_command_start("New"), 0);
+        assert_eq!(trailing_voice_command_start("hello world"), 11);
+        assert_eq!(trailing_voice_command_start("renew"), 5);
+        assert_eq!(trailing_voice_command_start(""), 0);
+    }
 
     /// Exercise the complete cleanup sequence with an explicitly selected
     /// language. Individual tests below predate the split between filler

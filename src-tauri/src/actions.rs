@@ -8,9 +8,7 @@ use crate::managers::model::ModelManager;
 use crate::managers::transcription::policy::{live_decode, LiveDecode, ModelTraits};
 use crate::managers::transcription::StreamWorkKind;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::{
-    get_settings, AppSettings, OverlayStyle, PasteMethod, APPLE_INTELLIGENCE_PROVIDER_ID,
-};
+use crate::settings::{get_settings, AppSettings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID};
 use crate::shortcut;
 use crate::tray::{set_tray_state, TrayIconState};
 use crate::utils::{
@@ -460,12 +458,9 @@ impl ShortcutAction for TranscribeAction {
         }
         // Live typing targets the window focused now, so begin it before the
         // overlay appears. Post-processing rewrites the whole text, so it keeps
-        // the paste-at-the-end path.
-        if settings.live_typing
-            && model_supports_streaming
-            && !self.post_process
-            && settings.paste_method != PasteMethod::None
-        {
+        // the paste-at-the-end path. Live typing always types directly, so the
+        // paste method does not apply to it.
+        if settings.live_typing && model_supports_streaming && !self.post_process {
             crate::live_typing::begin(app);
         } else {
             crate::live_typing::cancel(app);

@@ -531,7 +531,11 @@
       },
       "liveTyping": {
         "label": "Live Typing",
-        "description": "With a streaming model, type words into the app as you speak instead of pasting them when you stop. Typing pauses while Ctrl, Alt, Shift or Win is held, so tap the shortcut rather than holding it."
+        "description": "Type words into the app as you speak instead of pasting them when you stop. Works with streaming models such as Parakeet Streaming. Typing pauses while Ctrl, Alt, Shift or Win is held, so tap the shortcut rather than holding it."
+      },
+      "voiceCommands": {
+        "label": "Voice Commands",
+        "description": "Say \"comma\", \"full stop\", \"question mark\", \"exclamation mark\", \"colon\", \"semicolon\", \"new line\" or \"new paragraph\" to insert them. English only."
       },
       "keyboardImplementation": {
         "title": "מימוש מקלדת",
