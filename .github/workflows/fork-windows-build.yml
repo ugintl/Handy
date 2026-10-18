@@ -1,0 +1,26 @@
+name: "Fork Windows Build"
+
+# Unsigned Windows x64 installer for this fork. Pushing to live-typing builds
+# it; download the artifact from the run page.
+on:
+  workflow_dispatch:
+  push:
+    branches: [live-typing]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: "windows-latest"
+      target: "x86_64-pc-windows-msvc"
+      build-args: ""
+      sign-binaries: false
+      asset-prefix: "handy-live"
+      upload-artifacts: true
+    secrets: inherit

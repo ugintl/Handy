@@ -8,7 +8,9 @@ use crate::managers::model::ModelManager;
 use crate::managers::transcription::policy::{live_decode, LiveDecode, ModelTraits};
 use crate::managers::transcription::StreamWorkKind;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::{get_settings, AppSettings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID};
+use crate::settings::{
+    get_settings, AppSettings, OverlayStyle, PasteMethod, APPLE_INTELLIGENCE_PROVIDER_ID,
+};
 use crate::shortcut;
 use crate::tray::{set_tray_state, TrayIconState};
 use crate::utils::{
@@ -456,6 +458,18 @@ impl ShortcutAction for TranscribeAction {
         if live_decode(expected_model, settings.long_form_chunking) != LiveDecode::None {
             tm.start_stream();
         }
+        // Live typing targets the window focused now, so begin it before the
+        // overlay appears. Post-processing rewrites the whole text, so it keeps
+        // the paste-at-the-end path.
+        if settings.live_typing
+            && model_supports_streaming
+            && !self.post_process
+            && settings.paste_method != PasteMethod::None
+        {
+            crate::live_typing::begin(app);
+        } else {
+            crate::live_typing::cancel(app);
+        }
         let plan_elapsed = plan_started.elapsed();
 
         // Sizing the overlay follows the same advertised capability. A model that
@@ -731,12 +745,17 @@ impl ShortcutAction for TranscribeAction {
                             }
 
                             if processed.final_text.is_empty() {
+                                crate::live_typing::cancel(&ah);
                                 utils::hide_recording_overlay(&ah);
                                 set_tray_state(&ah, TrayIconState::Idle);
                             } else {
                                 let ah_clone = ah.clone();
                                 let paste_time = Instant::now();
                                 let final_text = processed.final_text;
+                                // Live typing already put most of the text on
+                                // screen; it finishes the rest off the main
+                                // thread, since it may wait for keys to lift.
+                                let live_typed = crate::live_typing::finish(&ah, &final_text);
                                 let rm_for_paste = Arc::clone(&rm);
                                 ah.run_on_main_thread(move || {
                                     if rm_for_paste.was_cancelled_since(cancel_generation) {
@@ -746,7 +765,12 @@ impl ShortcutAction for TranscribeAction {
                                         return;
                                     }
 
-                                    match utils::paste(final_text, ah_clone.clone()) {
+                                    let result = if live_typed {
+                                        Ok(())
+                                    } else {
+                                        utils::paste(final_text, ah_clone.clone())
+                                    };
+                                    match result {
                                         Ok(()) => debug!(
                                             "Text pasted successfully in {:?}",
                                             paste_time.elapsed()

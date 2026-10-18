@@ -499,6 +499,10 @@
         "label": "إضافة مسافة تابعة",
         "description": "إضافة مسافة بعد التفريغ الملصق"
       },
+      "liveTyping": {
+        "label": "Live Typing",
+        "description": "With a streaming model, type words into the app as you speak instead of pasting them when you stop. Typing pauses while Ctrl, Alt, Shift or Win is held, so tap the shortcut rather than holding it."
+      },
       "keyboardImplementation": {
         "title": "تنفيذ لوحة المفاتيح",
         "description": ".اختر الواجهة الخلفية لاختصارات لوحة المفاتيح",

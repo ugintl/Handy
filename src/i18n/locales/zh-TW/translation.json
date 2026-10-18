@@ -529,6 +529,10 @@
         "label": "附加尾部空格",
         "description": "在貼上的轉錄後新增空格"
       },
+      "liveTyping": {
+        "label": "Live Typing",
+        "description": "With a streaming model, type words into the app as you speak instead of pasting them when you stop. Typing pauses while Ctrl, Alt, Shift or Win is held, so tap the shortcut rather than holding it."
+      },
       "keyboardImplementation": {
         "title": "鍵盤實作",
         "description": "選擇鍵盤快捷鍵的後端",

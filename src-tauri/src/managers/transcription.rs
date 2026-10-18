@@ -1219,6 +1219,7 @@ fn join_chunks(transcripts: Vec<Transcript>) -> (String, Option<String>) {
 }
 
 fn emit_stream_text(app_handle: &AppHandle, committed: &str, tentative: &str) {
+    crate::live_typing::on_committed(app_handle, committed);
     let _ = StreamTextEvent {
         committed: committed.to_string(),
         tentative: tentative.to_string(),
