@@ -476,39 +476,124 @@ pub fn normalize_transcription_output(text: &str) -> String {
     normalized.trim().to_string()
 }
 
-/// Spoken commands, longest first so "new paragraph" wins over "new line".
-/// Group 1 is punctuation the model put before the command, group 2 the
-/// command itself; trailing punctuation and spaces are consumed.
+/// How a voice command's text joins the words around it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Spacing {
+    /// A line break; the next word starts with a capital.
+    Break,
+    /// Attaches to the word before: "hello," / "(aside)".
+    Trailing,
+    /// Attaches to the word after: "(aside" / "#topic".
+    Opening,
+    /// Attaches to both words: "well-known" / "john@example".
+    Joined,
+    /// Stands alone between spaces: "Tom & Jerry".
+    Spaced,
+}
+
+/// Spoken commands: what the user says (including spellings the speech model
+/// tends to produce instead), the text it becomes, and how that text is spaced.
+/// Only phrases unlikely in ordinary speech belong here; "period" and "dot"
+/// are left out because they are common words.
+const VOICE_COMMANDS: &[(&[&str], &str, Spacing)] = &[
+    (&["new paragraph"], "\n\n", Spacing::Break),
+    (&["new line", "next line"], "\n", Spacing::Break),
+    (&["full stop", "fully stop"], ".", Spacing::Trailing),
+    (
+        &["comma", "coma", "commer", "corma", "gorma"],
+        ",",
+        Spacing::Trailing,
+    ),
+    (&["question mark"], "?", Spacing::Trailing),
+    (
+        &["exclamation mark", "exclamation point"],
+        "!",
+        Spacing::Trailing,
+    ),
+    (&["semicolon", "semi colon"], ";", Spacing::Trailing),
+    (&["colon"], ":", Spacing::Trailing),
+    (&["ellipsis", "dot dot dot"], "...", Spacing::Trailing),
+    (
+        &["open bracket", "open parenthesis", "open paren"],
+        "(",
+        Spacing::Opening,
+    ),
+    (
+        &["close bracket", "close parenthesis", "close paren"],
+        ")",
+        Spacing::Trailing,
+    ),
+    (&["open square bracket"], "[", Spacing::Opening),
+    (&["close square bracket"], "]", Spacing::Trailing),
+    (&["open curly bracket", "open brace"], "{", Spacing::Opening),
+    (&["close curly bracket", "close brace"], "}", Spacing::Trailing),
+    (&["open quote", "begin quote"], "\"", Spacing::Opening),
+    (&["close quote", "end quote", "unquote"], "\"", Spacing::Trailing),
+    (&["open single quote"], "'", Spacing::Opening),
+    (&["close single quote"], "'", Spacing::Trailing),
+    (&["apostrophe"], "'", Spacing::Joined),
+    (&["hyphen"], "-", Spacing::Joined),
+    (&["em dash"], "\u{2014}", Spacing::Joined),
+    (&["dash"], "-", Spacing::Spaced),
+    (&["forward slash", "slash"], "/", Spacing::Joined),
+    (&["backslash", "back slash"], "\\", Spacing::Joined),
+    (&["underscore"], "_", Spacing::Joined),
+    (&["at sign"], "@", Spacing::Joined),
+    (&["ampersand"], "&", Spacing::Spaced),
+    (&["plus sign"], "+", Spacing::Spaced),
+    (&["equals sign"], "=", Spacing::Spaced),
+    (&["asterisk"], "*", Spacing::Spaced),
+    (&["hashtag", "hash sign"], "#", Spacing::Opening),
+    (&["dollar sign"], "$", Spacing::Opening),
+    (&["percent sign"], "%", Spacing::Trailing),
+];
+
+/// Most words in one command phrase ("open square bracket").
+const MAX_COMMAND_WORDS: usize = 3;
+
+/// Characters after which an opening symbol needs no space before it.
+const NO_SPACE_AFTER: &[char] = &['(', '[', '{', '/', '\\', '-', '@', '#', '$', '_'];
+
+/// Every command phrase, longest first so "new paragraph" wins over "new"
+/// anything and "open square bracket" over "open bracket". Group 1 is
+/// punctuation the model put before the command, group 2 the command itself;
+/// trailing punctuation and spaces are consumed.
 static VOICE_COMMAND_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"(?i)([,.;:!?]?)\s*\b(new paragraph|new line|next line|full stop|question mark|exclamation mark|exclamation point|semi ?colon|colon|comma)\b[,.;:!?]?[ \t]*",
-    )
+    let mut phrases: Vec<&str> = VOICE_COMMANDS
+        .iter()
+        .flat_map(|(phrases, _, _)| phrases.iter().copied())
+        .collect();
+    phrases.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    let alternatives: Vec<String> = phrases
+        .iter()
+        .map(|p| regex::escape(p).replace(' ', r"\s+"))
+        .collect();
+    Regex::new(&format!(
+        r"(?i)([,.;:!?]?)\s*\b({})\b[,.;:!?]?[ \t]*",
+        alternatives.join("|")
+    ))
     .unwrap()
 });
 
-/// First words of the multi-word commands above. Live typing holds one back
-/// at the end of the text until the next word shows whether it is a command.
-const VOICE_COMMAND_FIRST_WORDS: &[&str] =
-    &["new", "next", "full", "question", "exclamation", "semi"];
-
-/// What a spoken command becomes.
-fn voice_command_text(command: &str) -> &'static str {
-    match command.to_lowercase().as_str() {
-        "new paragraph" => "\n\n",
-        "new line" | "next line" => "\n",
-        "full stop" => ".",
-        "question mark" => "?",
-        "exclamation mark" | "exclamation point" => "!",
-        "colon" => ":",
-        "comma" => ",",
-        _ => ";", // "semicolon" / "semi colon"
-    }
+/// What a spoken command becomes, and how it is spaced.
+fn voice_command(spoken: &str) -> (&'static str, Spacing) {
+    let spoken = spoken
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    VOICE_COMMANDS
+        .iter()
+        .find(|(phrases, _, _)| phrases.contains(&spoken.as_str()))
+        .map(|&(_, text, spacing)| (text, spacing))
+        .unwrap_or((",", Spacing::Trailing))
 }
 
-/// Replaces spoken punctuation ("full stop", "comma", "new line", ...) with
-/// the characters it names, and capitalizes the word after a sentence end or
-/// line break. Punctuation the model added around a command is dropped, except
-/// a sentence end before a line break.
+/// Replaces spoken punctuation and symbols ("full stop", "comma", "new line",
+/// "open bracket", ...) with the characters they name, spaced the way the
+/// symbol is written, and capitalizes the word after a sentence end or line
+/// break. Punctuation the model added around a command is dropped, except a
+/// sentence end before a line break.
 ///
 /// Must run after [`normalize_transcription_output`], which collapses all
 /// whitespace (line breaks included) to single spaces.
@@ -525,24 +610,43 @@ pub fn apply_voice_commands(text: &str) -> String {
         out.truncate(out.trim_end_matches([' ', '\t']).len());
 
         let before = &caps[1];
-        let replacement = voice_command_text(&caps[2]);
-        if replacement.starts_with('\n') {
-            if matches!(before, "." | "!" | "?") {
-                out.push_str(before);
+        let (symbol, spacing) = voice_command(&caps[2]);
+        // Keep a space before the next word, but not before a line break or
+        // more punctuation.
+        let word_follows = text[resume..]
+            .chars()
+            .next()
+            .is_some_and(char::is_alphanumeric);
+        match spacing {
+            Spacing::Break => {
+                if matches!(before, "." | "!" | "?") {
+                    out.push_str(before);
+                }
+                out.push_str(symbol);
+                capital_owed = true;
             }
-            out.push_str(replacement);
-            capital_owed = true;
-        } else {
-            out.push_str(replacement);
-            capital_owed = matches!(replacement, "." | "!" | "?");
-            // Keep a space before the next word, but not before a line break
-            // or more punctuation.
-            if text[resume..]
-                .chars()
-                .next()
-                .is_some_and(char::is_alphanumeric)
-            {
-                out.push(' ');
+            Spacing::Trailing => {
+                out.push_str(symbol);
+                capital_owed = matches!(symbol, "." | "!" | "?");
+                if word_follows {
+                    out.push(' ');
+                }
+            }
+            Spacing::Opening => {
+                if out.ends_with(|c: char| !c.is_whitespace() && !NO_SPACE_AFTER.contains(&c)) {
+                    out.push(' ');
+                }
+                out.push_str(symbol);
+            }
+            Spacing::Joined => out.push_str(symbol),
+            Spacing::Spaced => {
+                if out.ends_with(|c: char| !c.is_whitespace()) {
+                    out.push(' ');
+                }
+                out.push_str(symbol);
+                if word_follows {
+                    out.push(' ');
+                }
             }
         }
     }
@@ -552,21 +656,43 @@ pub fn apply_voice_commands(text: &str) -> String {
 }
 
 /// Byte index where a trailing, possibly unfinished voice command starts
-/// ("... and new" might become "new line"), or `text.len()` if the text does
-/// not end with the first word of one.
+/// ("... and new" or "... new par" might become "new paragraph"), or
+/// `text.len()` if the text does not end with the start of one.
 pub fn trailing_voice_command_start(text: &str) -> usize {
     let trimmed = text.trim_end();
-    let word_start = trimmed
-        .char_indices()
-        .rev()
-        .find(|(_, c)| !c.is_alphabetic())
-        .map_or(0, |(i, c)| i + c.len_utf8());
-    let word = trimmed[word_start..].to_lowercase();
-    if VOICE_COMMAND_FIRST_WORDS.contains(&word.as_str()) {
-        trimmed[..word_start].trim_end().len()
-    } else {
-        text.len()
+    let mut held = text.len();
+    let mut start = trimmed.len();
+
+    for _ in 0..MAX_COMMAND_WORDS {
+        // Step back over the spaces before the current word, then one word.
+        let before = trimmed[..start].trim_end_matches([' ', '\t']);
+        if start < trimmed.len() && before.len() == start {
+            break; // The word is not separated by a space.
+        }
+        let word_start = before
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !c.is_alphabetic())
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        if word_start == before.len() {
+            break; // No word: punctuation or a line break.
+        }
+        start = word_start;
+
+        let tail = trimmed[start..]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        let starts_command = VOICE_COMMANDS
+            .iter()
+            .flat_map(|(phrases, _, _)| phrases.iter())
+            .any(|p| p.len() > tail.len() && p.starts_with(&tail));
+        if starts_command {
+            held = trimmed[..start].trim_end().len();
+        }
     }
+    held
 }
 
 #[cfg(test)]
@@ -628,6 +754,57 @@ mod tests {
         assert_eq!(trailing_voice_command_start("hello world"), 11);
         assert_eq!(trailing_voice_command_start("renew"), 5);
         assert_eq!(trailing_voice_command_start(""), 0);
+    }
+
+    #[test]
+    fn trailing_voice_command_start_holds_back_unfinished_phrases() {
+        // A word cut off mid-way by the stream.
+        assert_eq!(trailing_voice_command_start("the update. New par"), 11);
+        assert_eq!(trailing_voice_command_start("the list open square"), 8);
+        assert_eq!(trailing_voice_command_start("hello there"), 11);
+        // A command never spans a line break.
+        assert_eq!(trailing_voice_command_start("hi\nnew"), 2);
+        assert_eq!(trailing_voice_command_start("new\nhi"), 6);
+    }
+
+    #[test]
+    fn voice_commands_accept_common_mishearings() {
+        assert_eq!(
+            apply_voice_commands("Dear John Corma thanks fully stop"),
+            "Dear John, thanks."
+        );
+        assert_eq!(apply_voice_commands("yes Commer no"), "yes, no");
+    }
+
+    #[test]
+    fn voice_commands_space_brackets_and_quotes() {
+        assert_eq!(
+            apply_voice_commands("see the notes open bracket page two close bracket full stop"),
+            "see the notes (page two)."
+        );
+        assert_eq!(
+            apply_voice_commands("he said open quote hello close quote and left"),
+            "he said \"hello\" and left"
+        );
+        assert_eq!(
+            apply_voice_commands("list open square bracket one close square bracket"),
+            "list [one]"
+        );
+    }
+
+    #[test]
+    fn voice_commands_join_and_space_symbols() {
+        assert_eq!(
+            apply_voice_commands("a well hyphen known name"),
+            "a well-known name"
+        );
+        assert_eq!(apply_voice_commands("john at sign example"), "john@example");
+        assert_eq!(apply_voice_commands("Tom ampersand Jerry"), "Tom & Jerry");
+        assert_eq!(apply_voice_commands("yes dash no"), "yes - no");
+        assert_eq!(apply_voice_commands("yes em dash no"), "yes\u{2014}no");
+        assert_eq!(apply_voice_commands("fifty percent sign off"), "fifty% off");
+        assert_eq!(apply_voice_commands("tag hashtag news"), "tag #news");
+        assert_eq!(apply_voice_commands("wait ellipsis okay"), "wait... okay");
     }
 
     /// Exercise the complete cleanup sequence with an explicitly selected

@@ -549,7 +549,7 @@
       },
       "voiceCommands": {
         "label": "Voice Commands",
-        "description": "Say \"comma\", \"full stop\", \"question mark\", \"exclamation mark\", \"colon\", \"semicolon\", \"new line\" or \"new paragraph\" to insert them. English only."
+        "description": "Say punctuation and symbols to insert them: \"comma\", \"full stop\", \"question mark\", \"new line\", \"new paragraph\", \"open bracket\" / \"close bracket\", \"open quote\" / \"close quote\", \"hyphen\", \"dash\", \"slash\", \"at sign\", \"hashtag\" and more. English only. Stop with the shortcut, not Esc: Esc cancels and skips the final correction."
       },
       "keyboardImplementation": {
         "title": "Keyboard Implementation",

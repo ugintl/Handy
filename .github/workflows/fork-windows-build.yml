@@ -1,7 +1,8 @@
 name: "Fork Windows Build"
 
-# Unsigned Windows x64 installer for this fork. Pushing to live-typing builds
-# it; download the artifact from the run page.
+# Unsigned Windows x64 installer for this fork, plus the Rust unit tests.
+# Pushing to live-typing builds it; download the artifact from the run page.
+# The artifact name carries the run number so installers can be told apart.
 on:
   workflow_dispatch:
   push:
@@ -21,6 +22,26 @@ jobs:
       target: "x86_64-pc-windows-msvc"
       build-args: ""
       sign-binaries: false
-      asset-prefix: "handy-live"
+      asset-prefix: "handy-live-${{ github.run_number }}"
       upload-artifacts: true
     secrets: inherit
+
+  # Same as upstream's test.yml, which only runs on main and pull requests.
+  rust-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev libssl-dev libgtk-layer-shell-dev \
+            libvulkan-dev glslc spirv-headers
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Run Rust tests
+        working-directory: src-tauri
+        run: cargo test

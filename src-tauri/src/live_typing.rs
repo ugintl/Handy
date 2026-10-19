@@ -51,8 +51,8 @@ const MIN_CHARS_PER_SEC: f64 = 20.0;
 /// append-only, so this only guards against an unexpected rewrite.
 const MAX_LIVE_FIX: usize = 24;
 /// Largest rewritten tail fixed when the recording stops (custom words,
-/// filler removal near the end, punctuation).
-const MAX_FINAL_FIX: usize = 64;
+/// filler removal, words the live pass misheard).
+const MAX_FINAL_FIX: usize = 400;
 /// How long [`finish`] waits for modifiers to be released and the target
 /// window to be focused before giving up on the remaining text.
 const FINISH_READY_TIMEOUT: Duration = Duration::from_secs(3);
