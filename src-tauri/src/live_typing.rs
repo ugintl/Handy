@@ -160,6 +160,8 @@ struct Worker {
     /// Set when the committed text diverged beyond what is safe to fix live;
     /// the rest is left for [`finish`].
     stalled: bool,
+    /// When the session started, for timing logs.
+    started: Instant,
     last_commit: Option<Instant>,
     /// Smoothed gap between commits.
     commit_gap: Duration,
@@ -187,6 +189,7 @@ impl Worker {
             typed: String::new(),
             committed: String::new(),
             stalled: false,
+            started: Instant::now(),
             last_commit: None,
             commit_gap: INITIAL_COMMIT_GAP,
             pace: MIN_CHARS_PER_SEC,
@@ -263,18 +266,27 @@ impl Worker {
         if committed == self.committed {
             return;
         }
-        self.committed = committed;
 
         let now = Instant::now();
-        if let Some(last) = self.last_commit.replace(now) {
-            let gap = now - last;
-            if gap < MAX_COMMIT_GAP {
-                self.commit_gap = self.commit_gap.mul_f64(0.7) + gap.mul_f64(0.3);
-            }
+        let behind = self.pending().1;
+        let before = self.committed.chars().count();
+        self.committed = committed;
+        let added = self.committed.chars().count().saturating_sub(before);
+        let gap = self.last_commit.replace(now).map(|last| now - last);
+        if let Some(gap) = gap.filter(|gap| *gap < MAX_COMMIT_GAP) {
+            self.commit_gap = self.commit_gap.mul_f64(0.7) + gap.mul_f64(0.3);
         }
         let pending = self.pending().1;
         self.pace = (pending as f64 / (self.commit_gap.as_secs_f64() * PACE_SHARE))
             .max(MIN_CHARS_PER_SEC);
+        debug!(
+            "Live typing: commit at {:.2}s, {} ms after the last, +{} chars, {} still untyped from before, pace {:.0} chars/s",
+            (now - self.started).as_secs_f64(),
+            gap.map_or(0, |gap| gap.as_millis()),
+            added,
+            behind,
+            self.pace
+        );
     }
 
     /// Byte length of the typed text still matching the committed text, and
@@ -313,6 +325,12 @@ impl Worker {
         let goal = self.committed[..end].to_string();
         if self.converge(&goal, MAX_LIVE_FIX) {
             self.budget -= count as f64;
+            if self.typed == self.committed {
+                debug!(
+                    "Live typing: caught up at {:.2}s",
+                    self.started.elapsed().as_secs_f64()
+                );
+            }
         } else {
             warn!("Live typing: committed text was rewritten; waiting for the final transcript");
             self.stalled = true;

@@ -801,6 +801,9 @@ pub fn run(cli_args: CliArgs) {
         .plugin(
             LogBuilder::new()
                 .level(log::LevelFilter::Trace) // Set to most verbose level globally
+                // enigo logs every typed character at debug, which fills the
+                // 500 KB log within a few live-typing sessions.
+                .level_for("enigo", log::LevelFilter::Info)
                 .max_file_size(500_000)
                 .rotation_strategy(RotationStrategy::KeepOne)
                 .clear_targets()
