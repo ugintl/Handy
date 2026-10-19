@@ -6,9 +6,8 @@
 //! second, so new text is typed at a steady pace spread over the expected gap
 //! to the next commit rather than all at once. The same filler removal and
 //! voice commands as the final transcript are applied as it goes, holding back
-//! a trailing word that may start a command ("new" before "line") and a
-//! trailing line break until the next word arrives, so a break the model drops
-//! after a pause never has to be backspaced.
+//! a trailing word that may start a command ("new" before "line"). Line breaks
+//! are typed right away, so the user sees that "new line" worked.
 //!
 //! Typing pauses while a modifier key is held (a held Ctrl would turn letters
 //! into shortcuts) and while another window is focused, and resumes once both
@@ -253,7 +252,6 @@ impl Worker {
         }
         let mut text = apply_voice_commands(&text);
         text.truncate(trailing_voice_command_start(&text));
-        text.truncate(text.trim_end_matches('\n').len());
         text
     }
 
