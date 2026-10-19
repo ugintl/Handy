@@ -88,6 +88,10 @@ pub struct CaptureSink {
     /// counts; readiness is not speech.
     ready: Option<mpsc::Sender<()>>,
     samples: Vec<f32>,
+    /// Samples received so far, speech or not, to time VAD transitions.
+    received: usize,
+    /// Whether the last frame passed VAD, to log speech starts and ends.
+    in_speech: bool,
 }
 
 /// Spectrum window at 16 kHz: 32 ms, near the overlay's ~30 Hz refresh.
@@ -123,6 +127,8 @@ impl CaptureSink {
             on_audio,
             ready: Some(ready),
             samples: Vec::new(),
+            received: 0,
+            in_speech: false,
         }
     }
 
@@ -179,14 +185,23 @@ impl Sink for CaptureSink {
             return;
         }
 
+        self.received += real.len();
         // The detector needs whole frames, so the final chunk goes in with its
         // zero padding; at most one frame of silence reaches the recording.
-        match self
+        let frame = self
             .vad
             .detector
             .push_frame(chunk.samples)
-            .unwrap_or(VadFrame::Speech(chunk.samples))
-        {
+            .unwrap_or(VadFrame::Speech(chunk.samples));
+        if frame.is_speech() != self.in_speech {
+            self.in_speech = frame.is_speech();
+            log::debug!(
+                "VAD: speech {} at {:.1}s",
+                if self.in_speech { "started" } else { "ended" },
+                self.received as f64 / constants::WHISPER_SAMPLE_RATE as f64
+            );
+        }
+        match frame {
             VadFrame::Speech(frame) => Self::emit(&mut self.samples, &self.on_audio, frame),
             VadFrame::Noise => {}
         }

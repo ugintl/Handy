@@ -167,6 +167,8 @@ struct Worker {
     /// Characters owed by the pace but not typed yet.
     budget: f64,
     last_tick: Instant,
+    /// Why typing is currently waiting, logged once per wait.
+    waiting: Option<&'static str>,
 }
 
 impl Worker {
@@ -189,6 +191,7 @@ impl Worker {
             pace: MIN_CHARS_PER_SEC,
             budget: 0.0,
             last_tick: Instant::now(),
+            waiting: None,
         }
     }
 
@@ -209,8 +212,22 @@ impl Worker {
         }
     }
 
-    fn ready(&self) -> bool {
-        !platform::modifiers_held() && platform::foreground_window() == self.target
+    fn ready(&mut self) -> bool {
+        let blocked = if platform::modifiers_held() {
+            Some("a modifier key is held")
+        } else if platform::foreground_window() != self.target {
+            Some("another window is focused")
+        } else {
+            None
+        };
+        if blocked != self.waiting {
+            match blocked {
+                Some(reason) => debug!("Live typing waiting: {}", reason),
+                None => debug!("Live typing resumed"),
+            }
+            self.waiting = blocked;
+        }
+        blocked.is_none()
     }
 
     /// The committed text as it should appear on screen: cleaned up like the
@@ -352,8 +369,15 @@ impl Worker {
             thread::sleep(POLL_INTERVAL);
         }
         if !self.ready() {
-            warn!("Live typing: target window lost focus; leaving the rest on the clipboard");
-            let _ = self.app.clipboard().write_text(&final_text);
+            if final_text == self.typed {
+                debug!("Live typing finished; nothing left to type");
+            } else {
+                warn!(
+                    "Live typing: {}; leaving the rest on the clipboard",
+                    self.waiting.unwrap_or("not ready")
+                );
+                let _ = self.app.clipboard().write_text(&final_text);
+            }
             return true;
         }
 

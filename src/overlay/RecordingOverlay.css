@@ -328,7 +328,7 @@
 .sdot.ready {
   background: var(--s-accent);
   opacity: 1;
-  animation: sdot-pulse 1.9s infinite;
+  animation: sdot-pulse 1.4s ease-out infinite;
 }
 /* A quiet neutral dot while the host has not delivered its first sample yet. */
 .sdot.arming {
@@ -336,12 +336,20 @@
   opacity: 0.45;
   animation: none;
 }
+/* A clear heartbeat so a silent pause still reads as "recording". */
 @keyframes sdot-pulse {
   0% {
-    box-shadow: 0 0 0 0 var(--s-accent-soft);
+    box-shadow: 0 0 0 0 var(--s-accent);
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
   }
   70% {
-    box-shadow: 0 0 0 7px transparent;
+    box-shadow: 0 0 0 9px transparent;
+  }
+  100% {
+    opacity: 1;
   }
 }
 .stimer {

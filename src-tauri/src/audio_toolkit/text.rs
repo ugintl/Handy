@@ -498,7 +498,7 @@ enum Spacing {
 const VOICE_COMMANDS: &[(&[&str], &str, Spacing)] = &[
     (&["new paragraph"], "\n\n", Spacing::Break),
     (&["new line", "next line"], "\n", Spacing::Break),
-    (&["full stop", "fully stop"], ".", Spacing::Trailing),
+    (&["full stop", "fully stop", "full store"], ".", Spacing::Trailing),
     (
         &["comma", "coma", "commer", "corma", "gorma"],
         ",",
@@ -519,18 +519,32 @@ const VOICE_COMMANDS: &[(&[&str], &str, Spacing)] = &[
         Spacing::Opening,
     ),
     (
-        &["close bracket", "close parenthesis", "close paren"],
+        &[
+            "close bracket",
+            "closed bracket",
+            "close parenthesis",
+            "closed parenthesis",
+            "close paren",
+        ],
         ")",
         Spacing::Trailing,
     ),
     (&["open square bracket"], "[", Spacing::Opening),
-    (&["close square bracket"], "]", Spacing::Trailing),
+    (&["close square bracket", "closed square bracket"], "]", Spacing::Trailing),
     (&["open curly bracket", "open brace"], "{", Spacing::Opening),
-    (&["close curly bracket", "close brace"], "}", Spacing::Trailing),
-    (&["open quote", "begin quote"], "\"", Spacing::Opening),
-    (&["close quote", "end quote", "unquote"], "\"", Spacing::Trailing),
+    (
+        &["close curly bracket", "closed curly bracket", "close brace"],
+        "}",
+        Spacing::Trailing,
+    ),
+    (&["open quote", "open code", "begin quote"], "\"", Spacing::Opening),
+    (
+        &["close quote", "closed quote", "close code", "end quote", "unquote"],
+        "\"",
+        Spacing::Trailing,
+    ),
     (&["open single quote"], "'", Spacing::Opening),
-    (&["close single quote"], "'", Spacing::Trailing),
+    (&["close single quote", "closed single quote"], "'", Spacing::Trailing),
     (&["apostrophe"], "'", Spacing::Joined),
     (&["hyphen"], "-", Spacing::Joined),
     (&["em dash"], "\u{2014}", Spacing::Joined),
@@ -539,7 +553,7 @@ const VOICE_COMMANDS: &[(&[&str], &str, Spacing)] = &[
     (&["backslash", "back slash"], "\\", Spacing::Joined),
     (&["underscore"], "_", Spacing::Joined),
     (&["at sign"], "@", Spacing::Joined),
-    (&["ampersand"], "&", Spacing::Spaced),
+    (&["ampersand", "and sign"], "&", Spacing::Spaced),
     (&["plus sign"], "+", Spacing::Spaced),
     (&["equals sign"], "=", Spacing::Spaced),
     (&["asterisk"], "*", Spacing::Spaced),
@@ -774,6 +788,15 @@ mod tests {
             "Dear John, thanks."
         );
         assert_eq!(apply_voice_commands("yes Commer no"), "yes, no");
+        assert_eq!(
+            apply_voice_commands("notes open bracket page two closed bracket full store"),
+            "notes (page two)."
+        );
+        assert_eq!(
+            apply_voice_commands("he said open code hello close code and left"),
+            "he said \"hello\" and left"
+        );
+        assert_eq!(apply_voice_commands("Tom and sign Jerry"), "Tom & Jerry");
     }
 
     #[test]
