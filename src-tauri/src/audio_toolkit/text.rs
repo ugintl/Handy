@@ -614,8 +614,9 @@ fn voice_command(spoken: &str) -> (&'static str, Spacing) {
 /// Replaces spoken punctuation and symbols ("full stop", "comma", "new line",
 /// "open bracket", ...) with the characters they name, spaced the way the
 /// symbol is written, and capitalizes the word after a sentence end or line
-/// break. Punctuation the model added around a command is dropped, except a
-/// sentence end before a line break.
+/// break. Punctuation the model added around a command is dropped, except
+/// before a line break: the model often writes a spoken "comma" or "full stop"
+/// as the symbol itself ("Dear John, new line").
 ///
 /// Must run after [`normalize_transcription_output`], which collapses all
 /// whitespace (line breaks included) to single spaces.
@@ -641,9 +642,7 @@ pub fn apply_voice_commands(text: &str) -> String {
             .is_some_and(char::is_alphanumeric);
         match spacing {
             Spacing::Break => {
-                if matches!(before, "." | "!" | "?") {
-                    out.push_str(before);
-                }
+                out.push_str(before);
                 out.push_str(symbol);
                 capital_owed = true;
             }
@@ -753,7 +752,7 @@ mod tests {
     fn voice_commands_insert_line_breaks() {
         assert_eq!(
             apply_voice_commands("Dear John, new line thanks for the update."),
-            "Dear John\nThanks for the update."
+            "Dear John,\nThanks for the update."
         );
         assert_eq!(
             apply_voice_commands("That is all. New paragraph. next topic"),
