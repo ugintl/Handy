@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use log::{debug, error, info};
-use transcribe_cpp::StreamOptions;
+use transcribe_cpp::{ParakeetStreamOptions, StreamExtension, StreamOptions};
 
 use super::chunked::ChunkedDecode;
 use super::policy::LiveDecode;
@@ -16,6 +16,12 @@ use super::{
 use crate::audio_toolkit::OutputLanguageEvidence;
 use crate::engine_supervisor::{EngineError, LoadedInfo, StreamHandle, StreamProgress};
 use crate::settings::{get_settings, AppSettings};
+
+/// Right attention context for cache-aware streaming Parakeet models, in
+/// 80 ms frames. Their default is 13 (1.12 s chunks); 6 gives 0.56 s chunks,
+/// so text arrives about half a second sooner. NVIDIA's model card puts the
+/// cost at 7.07% average WER instead of 6.93%.
+const PARAKEET_STREAM_RIGHT_CONTEXT: i32 = 6;
 
 /// One recording's live decode, with the run setup its result finishes with.
 pub(super) struct LiveSession<'a> {
@@ -149,7 +155,7 @@ impl<'a> StreamSession<'a> {
         // Feed results arrive on the engine's thread; this callback only
         // converts and emits preview text.
         let perf = Arc::new(Mutex::new(StreamPerf::new()));
-        let on_progress = {
+        let make_on_progress = || {
             let perf = Arc::clone(&perf);
             let app_handle = tm.app_handle.clone();
             let languages = setup.languages.clone();
@@ -172,18 +178,46 @@ impl<'a> StreamSession<'a> {
         // without waiting; a crashed or hung worker makes finalize report no
         // result, and the caller falls back to batch transcription.
         // StreamOptions::default() uses CommitPolicy::Auto and lets the
-        // family pick its own streaming strategy (no family-specific ext).
-        let stream = match tm.engine.start_stream(
-            setup.run_options.clone(),
-            StreamOptions::default(),
-            on_progress,
-        ) {
-            Ok(stream) => stream,
-            Err(e) => {
-                error!("Failed to begin stream: {}", e);
-                tm.forget_model_if_engine_dropped(model_id, &e.to_string());
-                return None;
+        // family pick its own streaming strategy. Cache-aware streaming
+        // Parakeet models get a shorter lookahead; if the model rejects it,
+        // the stream begins again with the defaults.
+        let mut stream = None;
+        if info.arch == "parakeet" && info.variant.contains("streaming") {
+            let options = StreamOptions {
+                family: Some(StreamExtension::ParakeetStream(ParakeetStreamOptions {
+                    att_context_right: Some(PARAKEET_STREAM_RIGHT_CONTEXT),
+                })),
+                ..Default::default()
+            };
+            match tm
+                .engine
+                .start_stream(setup.run_options.clone(), options, make_on_progress())
+            {
+                Ok(s) => {
+                    info!(
+                        "Stream lookahead: {} frames ({} ms chunks)",
+                        PARAKEET_STREAM_RIGHT_CONTEXT,
+                        (PARAKEET_STREAM_RIGHT_CONTEXT + 1) * 80
+                    );
+                    stream = Some(s);
+                }
+                Err(e) => info!("Shorter stream lookahead rejected ({}); using the default", e),
             }
+        }
+        let stream = match stream {
+            Some(stream) => stream,
+            None => match tm.engine.start_stream(
+                setup.run_options.clone(),
+                StreamOptions::default(),
+                make_on_progress(),
+            ) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    error!("Failed to begin stream: {}", e);
+                    tm.forget_model_if_engine_dropped(model_id, &e.to_string());
+                    return None;
+                }
+            },
         };
 
         tm.stream_active.store(true, Ordering::Release);
