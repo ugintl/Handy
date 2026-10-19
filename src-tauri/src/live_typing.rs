@@ -6,7 +6,9 @@
 //! second, so new text is typed at a steady pace spread over the expected gap
 //! to the next commit rather than all at once. The same filler removal and
 //! voice commands as the final transcript are applied as it goes, holding back
-//! a trailing word that may start a command ("new" before "line").
+//! a trailing word that may start a command ("new" before "line") and a
+//! trailing line break until the next word arrives, so a break the model drops
+//! after a pause never has to be backspaced.
 //!
 //! Typing pauses while a modifier key is held (a held Ctrl would turn letters
 //! into shortcuts) and while another window is focused, and resumes once both
@@ -213,16 +215,22 @@ impl Worker {
     }
 
     fn ready(&mut self) -> bool {
+        let foreground = platform::foreground_window();
         let blocked = if platform::modifiers_held() {
             Some("a modifier key is held")
-        } else if platform::foreground_window() != self.target {
+        } else if foreground != self.target {
             Some("another window is focused")
         } else {
             None
         };
         if blocked != self.waiting {
             match blocked {
-                Some(reason) => debug!("Live typing waiting: {}", reason),
+                Some(reason) => debug!(
+                    "Live typing waiting: {} (focused window class '{}', target '{}')",
+                    reason,
+                    platform::window_class(foreground),
+                    platform::window_class(self.target)
+                ),
                 None => debug!("Live typing resumed"),
             }
             self.waiting = blocked;
@@ -245,6 +253,7 @@ impl Worker {
         }
         let mut text = apply_voice_commands(&text);
         text.truncate(trailing_voice_command_start(&text));
+        text.truncate(text.trim_end_matches('\n').len());
         text
     }
 
@@ -322,6 +331,14 @@ impl Worker {
             return false;
         }
         let insert = &target[common..];
+        if remove > 0 {
+            debug!(
+                "Live typing: correcting {} typed chars '{}' to '{}'",
+                remove,
+                shape(&self.typed[common..]),
+                shape(insert)
+            );
+        }
         let result = with_enigo(&self.app, |enigo| {
             for _ in 0..remove {
                 enigo
@@ -429,17 +446,42 @@ fn common_prefix_bytes(a: &str, b: &str) -> usize {
         .unwrap_or_else(|| a.len().min(b.len()))
 }
 
+/// The layout of `text` without its words, for logs: letters become `a`/`A`,
+/// digits `0`, line breaks `⏎`; spaces and punctuation are kept.
+fn shape(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' => '⏎',
+            c if c.is_uppercase() => 'A',
+            c if c.is_alphabetic() => 'a',
+            c if c.is_numeric() => '0',
+            c => c,
+        })
+        .collect()
+}
+
 #[cfg(windows)]
 mod platform {
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
     };
-    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow};
 
     /// The foreground window as a plain integer (HWND is not `Send`).
     pub fn foreground_window() -> Option<isize> {
         let hwnd = unsafe { GetForegroundWindow() };
         (!hwnd.0.is_null()).then_some(hwnd.0 as isize)
+    }
+
+    /// The window's class name ("Notepad", "Chrome_WidgetWin_1"), for logs.
+    pub fn window_class(window: Option<isize>) -> String {
+        let Some(window) = window else {
+            return "none".to_string();
+        };
+        let mut name = [0u16; 128];
+        let len = unsafe { GetClassNameW(HWND(window as *mut _), &mut name) };
+        String::from_utf16_lossy(&name[..len.max(0) as usize])
     }
 
     pub fn modifiers_held() -> bool {
@@ -460,6 +502,10 @@ mod platform {
         None
     }
 
+    pub fn window_class(_window: Option<isize>) -> String {
+        "none".to_string()
+    }
+
     pub fn modifiers_held() -> bool {
         false
     }
@@ -467,7 +513,12 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    use super::common_prefix_bytes;
+    use super::{common_prefix_bytes, shape};
+
+    #[test]
+    fn shape_hides_words_but_keeps_layout() {
+        assert_eq!(shape("Hi, Tom!\n\nPage 2."), "Aa, Aaa!⏎⏎Aaaa 0.");
+    }
 
     #[test]
     fn common_prefix_of_extension_is_the_shorter_string() {

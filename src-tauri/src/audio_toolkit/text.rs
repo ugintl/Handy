@@ -539,7 +539,15 @@ const VOICE_COMMANDS: &[(&[&str], &str, Spacing)] = &[
     ),
     (&["open quote", "open code", "begin quote"], "\"", Spacing::Opening),
     (
-        &["close quote", "closed quote", "close code", "end quote", "unquote"],
+        &[
+            "close quote",
+            "closed quote",
+            "close code",
+            "close court",
+            "closed court",
+            "end quote",
+            "unquote",
+        ],
         "\"",
         Spacing::Trailing,
     ),
@@ -553,7 +561,7 @@ const VOICE_COMMANDS: &[(&[&str], &str, Spacing)] = &[
     (&["backslash", "back slash"], "\\", Spacing::Joined),
     (&["underscore"], "_", Spacing::Joined),
     (&["at sign"], "@", Spacing::Joined),
-    (&["ampersand", "and sign"], "&", Spacing::Spaced),
+    (&["ampersand", "ampersant", "and sign"], "&", Spacing::Spaced),
     (&["plus sign"], "+", Spacing::Spaced),
     (&["equals sign"], "=", Spacing::Spaced),
     (&["asterisk"], "*", Spacing::Spaced),
@@ -797,6 +805,11 @@ mod tests {
             "he said \"hello\" and left"
         );
         assert_eq!(apply_voice_commands("Tom and sign Jerry"), "Tom & Jerry");
+        assert_eq!(apply_voice_commands("Tom ampersant Jerry"), "Tom & Jerry");
+        assert_eq!(
+            apply_voice_commands("he said open quote hello close court and left"),
+            "he said \"hello\" and left"
+        );
     }
 
     #[test]
