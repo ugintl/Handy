@@ -10,8 +10,10 @@
 //! are typed right away, so the user sees that "new line" worked.
 //!
 //! Typing pauses while a modifier key is held (a held Ctrl would turn letters
-//! into shortcuts) and while another window is focused, and resumes once both
-//! clear. When the recording stops,
+//! into shortcuts) and while another window is focused. When the user moves
+//! to another app and it keeps the focus for [`FOCUS_SETTLE`], typing follows
+//! it: text spoken from then on goes there, starting with a capital, and text
+//! still untyped at the switch is left out. When the recording stops,
 //! [`finish`] reconciles what was typed with the final transcript: missing
 //! text is appended, and a rewritten tail of up to [`MAX_FINAL_FIX`]
 //! characters is backspaced and retyped.
@@ -59,6 +61,9 @@ const MAX_FINAL_FIX: usize = 400;
 const FINISH_READY_TIMEOUT: Duration = Duration::from_secs(3);
 /// Upper bound on [`finish`] blocking its caller.
 const FINISH_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a newly focused window must keep the focus before typing moves
+/// to it, so windows passed through on the way (Alt+Tab) do not count.
+const FOCUS_SETTLE: Duration = Duration::from_millis(500);
 
 enum Msg {
     Committed(String),
@@ -152,7 +157,13 @@ struct Worker {
     settings: AppSettings,
     language: OutputLanguageEvidence,
     target: Option<isize>,
-    /// Text typed so far this session.
+    /// A newly focused window typing may move to, and since when it has had
+    /// the focus.
+    candidate: Option<(isize, Instant)>,
+    /// The committed text when typing last moved to another window; it
+    /// belongs to earlier windows. `None` while in the first window.
+    switched_after: Option<String>,
+    /// Text typed into the current window so far.
     typed: String,
     /// Latest committed text from the stream, cleaned up like the final
     /// transcript.
@@ -186,6 +197,8 @@ impl Worker {
             settings,
             language,
             target,
+            candidate: None,
+            switched_after: None,
             typed: String::new(),
             committed: String::new(),
             stalled: false,
@@ -214,6 +227,89 @@ impl Worker {
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
+    }
+
+    /// Move typing to a newly focused window once it has kept the focus for
+    /// [`FOCUS_SETTLE`]. Called every poll, whether or not text is pending.
+    fn follow_focus(&mut self) {
+        let foreground = platform::foreground_window();
+        if foreground == self.target {
+            self.candidate = None;
+            return;
+        }
+        let Some(window) = foreground.filter(|&w| platform::can_type_into(w)) else {
+            self.candidate = None;
+            return;
+        };
+        match self.candidate {
+            Some((w, since)) if w == window => {
+                if since.elapsed() >= FOCUS_SETTLE {
+                    self.retarget(window);
+                }
+            }
+            _ => self.candidate = Some((window, Instant::now())),
+        }
+    }
+
+    /// Start typing into `window`: from here on it gets the text committed
+    /// after this point.
+    fn retarget(&mut self, window: isize) {
+        let untyped = self.pending().1;
+        info!(
+            "Live typing: moved to the focused window (class '{}', was '{}'); \
+             {} untyped chars from before the switch left out",
+            platform::window_class(Some(window)),
+            platform::window_class(self.target),
+            untyped
+        );
+        self.target = Some(window);
+        self.candidate = None;
+        self.switched_after = Some(self.committed.clone());
+        self.typed.clear();
+        self.stalled = false;
+        self.budget = 0.0;
+    }
+
+    /// The text that belongs in the current window: all the committed text,
+    /// or after a switch, what was committed since.
+    fn goal(&self) -> String {
+        match &self.switched_after {
+            None => self.committed.clone(),
+            Some(before) => {
+                let rest = self
+                    .committed
+                    .strip_prefix(before.as_str())
+                    .or_else(|| self.committed.get(before.len()..))
+                    .unwrap_or("");
+                window_start(rest)
+            }
+        }
+    }
+
+    /// The part of the final transcript that belongs in the current window.
+    /// The final transcript usually starts with the text committed before the
+    /// switch; if the model rewrote that, the text typed here is looked up in
+    /// it instead. `None` if neither is found.
+    fn final_goal(&self, final_text: &str) -> Option<String> {
+        let Some(before) = &self.switched_after else {
+            return Some(final_text.to_string());
+        };
+        if let Some(rest) = final_text.strip_prefix(before.as_str()) {
+            return Some(window_start(rest));
+        }
+        // Skip the first character, which may have been capitalized here.
+        let first = self.typed.chars().next()?;
+        let typed_rest = &self.typed[first.len_utf8()..];
+        // Too short a piece could be found in the wrong place.
+        if typed_rest.chars().count() < 8 {
+            return None;
+        }
+        let found = final_text.rfind(typed_rest)?;
+        let start = final_text[..found]
+            .char_indices()
+            .next_back()
+            .map_or(found, |(i, _)| i);
+        Some(window_start(&final_text[start..]))
     }
 
     fn ready(&mut self) -> bool {
@@ -292,8 +388,9 @@ impl Worker {
     /// Byte length of the typed text still matching the committed text, and
     /// how many committed characters come after it.
     fn pending(&self) -> (usize, usize) {
-        let common = common_prefix_bytes(&self.typed, &self.committed);
-        (common, self.committed[common..].chars().count())
+        let goal = self.goal();
+        let common = common_prefix_bytes(&self.typed, &goal);
+        (common, goal[common..].chars().count())
     }
 
     /// Type the next few committed characters the pace allows, if it is safe
@@ -303,14 +400,17 @@ impl Worker {
         let elapsed = now - self.last_tick;
         self.last_tick = now;
 
-        if self.stalled || self.committed == self.typed {
+        self.follow_focus();
+        let goal = self.goal();
+        if self.stalled || goal == self.typed {
             self.budget = 0.0;
             return;
         }
         if !self.ready() {
             return;
         }
-        let (common, pending) = self.pending();
+        let common = common_prefix_bytes(&self.typed, &goal);
+        let pending = goal[common..].chars().count();
         let rewrite = common < self.typed.len();
         self.budget = (self.budget + self.pace * elapsed.as_secs_f64()).min(pending as f64);
         let count = self.budget as usize;
@@ -318,14 +418,13 @@ impl Worker {
             return;
         }
 
-        let end = self.committed[common..]
+        let end = goal[common..]
             .char_indices()
             .nth(count)
-            .map_or(self.committed.len(), |(i, _)| common + i);
-        let goal = self.committed[..end].to_string();
-        if self.converge(&goal, MAX_LIVE_FIX) {
+            .map_or(goal.len(), |(i, _)| common + i);
+        if self.converge(&goal[..end], MAX_LIVE_FIX) {
             self.budget -= count as f64;
-            if self.typed == self.committed {
+            if self.typed == goal {
                 debug!(
                     "Live typing: caught up at {:.2}s",
                     self.started.elapsed().as_secs_f64()
@@ -398,11 +497,17 @@ impl Worker {
         }
 
         let deadline = Instant::now() + FINISH_READY_TIMEOUT;
+        self.follow_focus();
         while !self.ready() && Instant::now() < deadline {
             thread::sleep(POLL_INTERVAL);
+            self.follow_focus();
         }
+        let goal = self.final_goal(&final_text).unwrap_or_else(|| {
+            warn!("Live typing: final transcript not matched after a window switch; keeping the typed text");
+            self.typed.clone()
+        });
         if !self.ready() {
-            if final_text == self.typed {
+            if goal == self.typed {
                 debug!("Live typing finished; nothing left to type");
             } else {
                 warn!(
@@ -414,7 +519,7 @@ impl Worker {
             return true;
         }
 
-        if !self.converge(&final_text, MAX_FINAL_FIX) {
+        if !self.converge(&goal, MAX_FINAL_FIX) {
             info!(
                 "Live typing: final transcript differs by more than {} characters; \
                  keeping the typed text",
@@ -452,6 +557,17 @@ fn with_enigo(
     f(&mut enigo)
 }
 
+/// Text that opens the typing in a newly focused window: leading spaces
+/// dropped and the first letter capitalized.
+fn window_start(text: &str) -> String {
+    let text = text.trim_start_matches([' ', '\t']);
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// Length in bytes of the longest common prefix of `a` and `b`, on a char
 /// boundary of both.
 fn common_prefix_bytes(a: &str, b: &str) -> usize {
@@ -482,7 +598,25 @@ mod platform {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    /// Window classes of the Windows shell (taskbar, desktop, Alt+Tab, Task
+    /// View, Start and search), which take the focus but are not for typing.
+    const SHELL_CLASSES: &[&str] = &[
+        "Shell_TrayWnd",
+        "Shell_SecondaryTrayWnd",
+        "NotifyIconOverflowWindow",
+        "Progman",
+        "WorkerW",
+        "MultitaskingViewFrame",
+        "TaskSwitcherWnd",
+        "XamlExplorerHostIslandWindow",
+        "ForegroundStaging",
+        "Windows.UI.Core.CoreWindow",
+        "#32768",
+    ];
 
     /// The foreground window as a plain integer (HWND is not `Send`).
     pub fn foreground_window() -> Option<isize> {
@@ -498,6 +632,14 @@ mod platform {
         let mut name = [0u16; 128];
         let len = unsafe { GetClassNameW(HWND(window as *mut _), &mut name) };
         String::from_utf16_lossy(&name[..len.max(0) as usize])
+    }
+
+    /// Whether typing may move to `window`: not one of this app's own
+    /// windows (settings, overlay) and not part of the Windows shell.
+    pub fn can_type_into(window: isize) -> bool {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(HWND(window as *mut _), Some(&mut pid)) };
+        pid != std::process::id() && !SHELL_CLASSES.contains(&window_class(Some(window)).as_str())
     }
 
     pub fn modifiers_held() -> bool {
@@ -522,6 +664,10 @@ mod platform {
         "none".to_string()
     }
 
+    pub fn can_type_into(_window: isize) -> bool {
+        false
+    }
+
     pub fn modifiers_held() -> bool {
         false
     }
@@ -529,7 +675,14 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
-    use super::{common_prefix_bytes, shape};
+    use super::{common_prefix_bytes, shape, window_start};
+
+    #[test]
+    fn window_start_drops_spaces_and_capitalizes() {
+        assert_eq!(window_start(" now the code"), "Now the code");
+        assert_eq!(window_start("\nnext"), "\nnext");
+        assert_eq!(window_start(""), "");
+    }
 
     #[test]
     fn shape_hides_words_but_keeps_layout() {

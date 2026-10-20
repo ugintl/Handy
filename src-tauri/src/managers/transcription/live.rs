@@ -15,13 +15,20 @@ use super::{
 };
 use crate::audio_toolkit::OutputLanguageEvidence;
 use crate::engine_supervisor::{EngineError, LoadedInfo, StreamHandle, StreamProgress};
-use crate::settings::{get_settings, AppSettings};
+use crate::settings::{get_settings, AppSettings, StreamLatency};
 
 /// Right attention context for cache-aware streaming Parakeet models, in
-/// 80 ms frames. Their default is 13 (1.12 s chunks); 6 gives 0.56 s chunks,
-/// so text arrives about half a second sooner. NVIDIA's model card puts the
-/// cost at 7.07% average WER instead of 6.93%.
-const PARAKEET_STREAM_RIGHT_CONTEXT: i32 = 6;
+/// 80 ms frames; a chunk is one frame more. The models' own default is 13
+/// (1.12 s chunks). Less lookahead brings text sooner at a small cost in
+/// accuracy (NVIDIA's model card: 7.07% average WER at 6 instead of 6.93%),
+/// and smaller chunks cost more model time per second of audio.
+fn parakeet_right_context(latency: StreamLatency) -> Option<i32> {
+    match latency {
+        StreamLatency::Fast => Some(1),
+        StreamLatency::Balanced => Some(6),
+        StreamLatency::Accurate => None,
+    }
+}
 
 /// One recording's live decode, with the run setup its result finishes with.
 pub(super) struct LiveSession<'a> {
@@ -179,13 +186,15 @@ impl<'a> StreamSession<'a> {
         // result, and the caller falls back to batch transcription.
         // StreamOptions::default() uses CommitPolicy::Auto and lets the
         // family pick its own streaming strategy. Cache-aware streaming
-        // Parakeet models get a shorter lookahead; if the model rejects it,
-        // the stream begins again with the defaults.
+        // Parakeet models get the lookahead the latency setting asks for; if
+        // the model rejects it, the stream begins again with the defaults.
         let mut stream = None;
-        if info.arch == "parakeet" && info.variant.contains("streaming") {
+        let right_context = parakeet_right_context(settings.stream_latency)
+            .filter(|_| info.arch == "parakeet" && info.variant.contains("streaming"));
+        if let Some(right_context) = right_context {
             let options = StreamOptions {
                 family: Some(StreamExtension::ParakeetStream(ParakeetStreamOptions {
-                    att_context_right: Some(PARAKEET_STREAM_RIGHT_CONTEXT),
+                    att_context_right: Some(right_context),
                 })),
                 ..Default::default()
             };
@@ -196,8 +205,8 @@ impl<'a> StreamSession<'a> {
                 Ok(s) => {
                     info!(
                         "Stream lookahead: {} frames ({} ms chunks)",
-                        PARAKEET_STREAM_RIGHT_CONTEXT,
-                        (PARAKEET_STREAM_RIGHT_CONTEXT + 1) * 80
+                        right_context,
+                        (right_context + 1) * 80
                     );
                     stream = Some(s);
                 }

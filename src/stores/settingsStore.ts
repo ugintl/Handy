@@ -170,6 +170,8 @@ const settingUpdaters: {
   live_typing: (value) => commands.changeLiveTypingSetting(value as boolean),
   voice_commands: (value) =>
     commands.changeVoiceCommandsSetting(value as boolean),
+  stream_latency: (value) =>
+    commands.changeStreamLatencySetting(value as string),
   log_level: (value) => commands.setLogLevel(value as any),
   app_language: (value) => commands.changeAppLanguageSetting(value as string),
   theme: (value) => commands.changeThemeSetting(value as string),

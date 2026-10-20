@@ -310,6 +310,20 @@ pub enum Theme {
     Dark,
 }
 
+/// How much audio a cache-aware streaming model waits for before it commits
+/// words: less is faster but slightly less accurate.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamLatency {
+    /// 0.16 s chunks.
+    Fast,
+    /// 0.56 s chunks.
+    #[default]
+    Balanced,
+    /// 1.12 s chunks, the model's own default.
+    Accurate,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TypingTool {
@@ -483,6 +497,9 @@ pub struct AppSettings {
     /// characters it names.
     #[serde(default = "default_voice_commands")]
     pub voice_commands: bool,
+    /// Lookahead of cache-aware streaming models (Parakeet Streaming).
+    #[serde(default)]
+    pub stream_latency: StreamLatency,
     #[serde(default = "default_app_language")]
     pub app_language: String,
     #[serde(default = "default_theme")]
@@ -1015,6 +1032,7 @@ pub fn get_default_settings() -> AppSettings {
         append_trailing_space: false,
         live_typing: false,
         voice_commands: default_voice_commands(),
+        stream_latency: StreamLatency::default(),
         app_language: default_app_language(),
         theme: default_theme(),
         experimental_enabled: false,

@@ -24,7 +24,7 @@ use crate::settings::APPLE_INTELLIGENCE_DEFAULT_MODEL_ID;
 use crate::settings::{
     self, get_settings, AutoSubmitKey, ChineseScript, ClipboardHandling, KeyboardImplementation,
     LLMPrompt, OverlayPosition, OverlayStyle, PasteMethod, ShortcutActivation, ShortcutBinding,
-    SoundTheme, Theme, TypingTool, VadBackend, APPLE_INTELLIGENCE_PROVIDER_ID,
+    SoundTheme, StreamLatency, Theme, TypingTool, VadBackend, APPLE_INTELLIGENCE_PROVIDER_ID,
 };
 use crate::tray;
 
@@ -1355,6 +1355,23 @@ pub fn change_live_typing_setting(app: AppHandle, enabled: bool) -> Result<(), S
 pub fn change_voice_commands_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     settings.voice_commands = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_stream_latency_setting(app: AppHandle, latency: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.stream_latency = match latency.as_str() {
+        "fast" => StreamLatency::Fast,
+        "balanced" => StreamLatency::Balanced,
+        "accurate" => StreamLatency::Accurate,
+        other => {
+            warn!("Invalid stream latency '{}', defaulting to balanced", other);
+            StreamLatency::Balanced
+        }
+    };
     settings::write_settings(&app, settings);
     Ok(())
 }

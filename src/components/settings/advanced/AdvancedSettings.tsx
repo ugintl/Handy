@@ -15,6 +15,7 @@ import { PostProcessingToggle } from "../PostProcessingToggle";
 import { AppendTrailingSpace } from "../AppendTrailingSpace";
 import { LiveTyping } from "../LiveTyping";
 import { VoiceCommands } from "../VoiceCommands";
+import { StreamLatencySetting } from "../StreamLatency";
 import { HistoryLimit } from "../HistoryLimit";
 import { RecordingRetentionPeriodSelector } from "../RecordingRetentionPeriod";
 import { ExperimentalToggle } from "../ExperimentalToggle";
@@ -48,6 +49,7 @@ export const AdvancedSettings: React.FC = () => {
         <PasteMethodSetting descriptionMode="tooltip" grouped={true} />
         <LiveTyping descriptionMode="tooltip" grouped={true} />
         <VoiceCommands descriptionMode="tooltip" grouped={true} />
+        <StreamLatencySetting descriptionMode="tooltip" grouped={true} />
         <TypingToolSetting descriptionMode="tooltip" grouped={true} />
         <ClipboardHandlingSetting descriptionMode="tooltip" grouped={true} />
         <AutoSubmit descriptionMode="tooltip" grouped={true} />

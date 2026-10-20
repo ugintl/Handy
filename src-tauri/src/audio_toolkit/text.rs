@@ -489,6 +489,8 @@ enum Spacing {
     Joined,
     /// Stands alone between spaces: "Tom & Jerry".
     Spaced,
+    /// Starts a list item on a new line: "• " or the next number ("2. ").
+    ListItem,
 }
 
 /// Spoken commands: what the user says (including spellings the speech model
@@ -498,6 +500,17 @@ enum Spacing {
 const VOICE_COMMANDS: &[(&[&str], &str, Spacing)] = &[
     (&["new paragraph"], "\n\n", Spacing::Break),
     (&["new line", "next line"], "\n", Spacing::Break),
+    (
+        &["bullet point", "new bullet", "next bullet"],
+        "\u{2022} ",
+        Spacing::ListItem,
+    ),
+    // Numbered items count up from 1; the empty text stands for the number.
+    (
+        &["number point", "numbered point", "next number"],
+        "",
+        Spacing::ListItem,
+    ),
     (&["full stop", "fully stop", "full store"], ".", Spacing::Trailing),
     (
         &["comma", "coma", "commer", "corma", "gorma"],
@@ -618,12 +631,16 @@ fn voice_command(spoken: &str) -> (&'static str, Spacing) {
 /// before a line break: the model often writes a spoken "comma" or "full stop"
 /// as the symbol itself ("Dear John, new line").
 ///
+/// "Bullet point" and "number point" start list items on new lines; numbers
+/// count up from 1 and start again after any other line break.
+///
 /// Must run after [`normalize_transcription_output`], which collapses all
 /// whitespace (line breaks included) to single spaces.
 pub fn apply_voice_commands(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut resume = 0;
     let mut capital_owed = false;
+    let mut list_number = 0;
 
     for caps in VOICE_COMMAND_PATTERN.captures_iter(text) {
         let whole = caps.get(0).unwrap();
@@ -644,6 +661,20 @@ pub fn apply_voice_commands(text: &str) -> String {
             Spacing::Break => {
                 out.push_str(before);
                 out.push_str(symbol);
+                capital_owed = true;
+                list_number = 0;
+            }
+            Spacing::ListItem => {
+                out.push_str(before);
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                if symbol.is_empty() {
+                    list_number += 1;
+                    out.push_str(&format!("{}. ", list_number));
+                } else {
+                    out.push_str(symbol);
+                }
                 capital_owed = true;
             }
             Spacing::Trailing => {
@@ -762,6 +793,32 @@ mod tests {
     }
 
     #[test]
+    fn voice_commands_start_list_items() {
+        assert_eq!(
+            apply_voice_commands("Shopping list: bullet point milk bullet point eggs"),
+            "Shopping list:\n\u{2022} Milk\n\u{2022} Eggs"
+        );
+        assert_eq!(
+            apply_voice_commands("Steps, number point open the app. Next number sign in"),
+            "Steps,\n1. Open the app.\n2. Sign in"
+        );
+        // A list at the very start, or right after a line break, adds no
+        // empty line.
+        assert_eq!(apply_voice_commands("bullet point one"), "\u{2022} One");
+        assert_eq!(
+            apply_voice_commands("To do new line number point call Tom"),
+            "To do\n1. Call Tom"
+        );
+        // Any other line break starts the numbering again.
+        assert_eq!(
+            apply_voice_commands(
+                "number point a number point b new paragraph number point c"
+            ),
+            "1. A\n2. B\n\n1. C"
+        );
+    }
+
+    #[test]
     fn voice_commands_leave_ordinary_words_alone() {
         let text = "A new product line and a colonel with a full stomach.";
         assert_eq!(apply_voice_commands(text), text);
@@ -774,6 +831,8 @@ mod tests {
         assert_eq!(trailing_voice_command_start("New"), 0);
         assert_eq!(trailing_voice_command_start("hello world"), 11);
         assert_eq!(trailing_voice_command_start("renew"), 5);
+        assert_eq!(trailing_voice_command_start("list bullet"), 4);
+        assert_eq!(trailing_voice_command_start("list number"), 4);
         assert_eq!(trailing_voice_command_start(""), 0);
     }
 
