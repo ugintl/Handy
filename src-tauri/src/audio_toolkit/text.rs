@@ -741,7 +741,8 @@ pub fn trailing_voice_command_start(text: &str) -> usize {
             .flat_map(|(phrases, _, _)| phrases.iter())
             .any(|p| p.len() > tail.len() && p.starts_with(&tail));
         if starts_command {
-            held = trimmed[..start].trim_end().len();
+            // Keep a line break before the held word: it was typed already.
+            held = trimmed[..start].trim_end_matches([' ', '\t']).len();
         }
     }
     held
@@ -843,7 +844,8 @@ mod tests {
         assert_eq!(trailing_voice_command_start("the list open square"), 8);
         assert_eq!(trailing_voice_command_start("hello there"), 11);
         // A command never spans a line break.
-        assert_eq!(trailing_voice_command_start("hi\nnew"), 2);
+        assert_eq!(trailing_voice_command_start("hi\nnew"), 3);
+        assert_eq!(trailing_voice_command_start("site.\nNew par"), 6);
         assert_eq!(trailing_voice_command_start("new\nhi"), 6);
     }
 
