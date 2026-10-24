@@ -1847,6 +1847,20 @@ mod tests {
     }
 
     #[test]
+    fn an_exiting_worker_does_not_clear_a_newer_route() {
+        let router = StreamRouter::new();
+        let (_old_rx, old_cancelled) = router.open();
+        router.take();
+        let (_new_rx, new_cancelled) = router.open();
+
+        router.clear(&old_cancelled);
+        assert!(router.is_open());
+
+        router.clear(&new_cancelled);
+        assert!(!router.is_open());
+    }
+
+    #[test]
     fn normal_hosts_preserve_every_transcribe_accelerator_setting() {
         for setting in [
             TranscribeAcceleratorSetting::Auto,
