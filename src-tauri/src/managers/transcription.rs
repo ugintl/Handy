@@ -162,10 +162,18 @@ impl StreamRouter {
     }
 
     /// Drop the channel and mark closed without sending a final command (used
-    /// when the worker exits without a finalize/cancel handshake).
-    fn clear(&self) {
-        self.open.store(false, Ordering::Relaxed);
-        *self.route.lock().unwrap() = None;
+    /// when the worker exits without a finalize/cancel handshake). Only the
+    /// route whose cancel flag is `cancelled` is cleared, so an exiting worker
+    /// never closes a newer recording's route.
+    fn clear(&self, cancelled: &Arc<AtomicBool>) {
+        let mut route = self.route.lock().unwrap();
+        if route
+            .as_ref()
+            .is_some_and(|r| Arc::ptr_eq(&r.cancelled, cancelled))
+        {
+            self.open.store(false, Ordering::Relaxed);
+            *route = None;
+        }
     }
 
     /// Forward a 16 kHz frame to the active streaming worker. Cheap no-op (a
@@ -254,15 +262,19 @@ pub struct TranscriptionManager {
     /// the worker once the stream begins). Used for overlay/UI decisions.
     stream_active: Arc<AtomicBool>,
     /// Streaming uses three independent flags: router open = frames should
-    /// route, worker active = no second worker may start, stream active = UI
+    /// route, worker active = the newest worker's id, stream active = UI
     /// should show a live session.
     ///
     /// Monotonic id source for stream workers; zero means "no worker".
     next_stream_worker_id: Arc<AtomicU64>,
-    /// Nonzero while a stream worker exists, even if it has not leased the engine
-    /// yet. This prevents a second worker from starting after finalize/cancel
-    /// closes the router but before the first worker has fully exited.
+    /// The newest stream worker's id while it exists, even if it has not
+    /// leased the engine yet; zero when none.
     active_stream_worker: Arc<AtomicU64>,
+    /// Held by a stream worker for its whole run, so a new recording's worker
+    /// waits for the previous one (finalizing, or cancelled while it waited
+    /// for the model to load) to exit before it leases the engine. Its frames
+    /// queue on its own channel meanwhile.
+    stream_slot: Arc<Mutex<()>>,
 }
 
 impl TranscriptionManager {
@@ -282,6 +294,7 @@ impl TranscriptionManager {
             stream_active: Arc::new(AtomicBool::new(false)),
             next_stream_worker_id: Arc::new(AtomicU64::new(1)),
             active_stream_worker: Arc::new(AtomicU64::new(0)),
+            stream_slot: Arc::new(Mutex::new(())),
         };
 
         // Start the idle watcher
@@ -727,18 +740,20 @@ impl TranscriptionManager {
     /// falls back to batch transcription. Frames sent before the decode begins
     /// queue on the channel and are not lost.
     pub fn start_stream(&self) {
-        if self.router.is_open() || self.active_stream_worker.load(Ordering::Acquire) != 0 {
+        if self.router.is_open() {
             warn!("start_stream called while a stream worker is already active");
             return;
         }
         let worker_id = self.next_stream_worker_id.fetch_add(1, Ordering::Relaxed);
-        if self
-            .active_stream_worker
-            .compare_exchange(0, worker_id, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            warn!("start_stream lost a race with another stream worker");
-            return;
+        let previous = self.active_stream_worker.swap(worker_id, Ordering::AcqRel);
+        if previous != 0 {
+            // A cancelled recording's worker can still be waiting for the
+            // model to load. Refusing here left the next recording with no
+            // live stream, so nothing was typed until it stopped.
+            info!(
+                "Stream worker {} is still exiting; worker {} will start after it",
+                previous, worker_id
+            );
         }
         let (rx, cancelled) = self.router.open();
         self.stream_active.store(false, Ordering::Release);
@@ -753,6 +768,12 @@ impl TranscriptionManager {
         cancelled: Arc<AtomicBool>,
         worker_id: u64,
     ) {
+        // Declared before `_worker`, so it is released after the guard has
+        // cleared this worker's flags.
+        let _slot = self
+            .stream_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _worker = StreamWorkerGuard {
             worker_id,
             active_stream_worker: Arc::clone(&self.active_stream_worker),
@@ -768,6 +789,13 @@ impl TranscriptionManager {
             }
         }
 
+        // Cancelled while it waited (e.g. a press too short to record): exit
+        // without starting a stream, so the next recording's worker can.
+        if cancelled.load(Ordering::Acquire) {
+            debug!("Stream worker {} cancelled before its stream began", worker_id);
+            return;
+        }
+
         let model_id = self.get_current_model().unwrap_or_default();
 
         // The loaded model (not the ModelManager copy) is the source of truth
@@ -778,7 +806,7 @@ impl TranscriptionManager {
                  streaming is unavailable, using batch transcription",
                 model_id
             );
-            self.router.clear();
+            self.router.clear(&cancelled);
             drain_until_finalize(rx);
             return;
         };
@@ -799,7 +827,7 @@ impl TranscriptionManager {
         );
         let Some(mut session) = LiveSession::begin(self, mode, &info, &model_id) else {
             // Nothing to decode live: the recording is transcribed in batch.
-            self.router.clear();
+            self.router.clear(&cancelled);
             drain_until_finalize(rx);
             return;
         };
